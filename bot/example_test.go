@@ -2,13 +2,14 @@ package bot
 
 import (
 	"encoding/hex"
-	"fmt"
-	"github.com/Tnze/go-mc/yggdrasil"
 	"log"
+
+	"github.com/Tnze/go-mc/offline"
+	"github.com/Tnze/go-mc/yggdrasil"
 )
 
 func ExamplePingAndList() {
-	resp, delay, err := PingAndList("localhost", 25565)
+	resp, delay, err := PingAndList("localhost:25565")
 	if err != nil {
 		log.Fatalf("ping and list server fail: %v", err)
 	}
@@ -19,25 +20,22 @@ func ExamplePingAndList() {
 
 func ExampleClient_JoinServer_offline() {
 	c := NewClient()
-	c.Auth.Name = "Tnze" // set it's name before login.
+	c.Auth.Name = "Tnze" // set its name before login.
 
-	id := OfflineUUID(c.Auth.Name) // optional, get uuid of offline mode game
+	id := offline.NameToUUID(c.Auth.Name) // optional, get uuid of offline mode game
 	c.Auth.UUID = hex.EncodeToString(id[:])
 
-	//Login
-	err := c.JoinServer("localhost", 25565)
+	// Login
+	err := c.JoinServer("127.0.0.1")
 	if err != nil {
 		log.Fatal(err)
 	}
 	log.Println("Login success")
 
-	// Regist event handlers
-	// 	c.Events.GameStart = onGameStartFunc
-	// 	c.Events.ChatMsg = onChatMsgFunc
-	// 	c.Events.Disconnect = onDisconnectFunc
-	//	...
+	// Register event handlers
+	// c.Events.AddListener(...)
 
-	//JoinGame
+	// JoinGame
 	err = c.HandleGame()
 	if err != nil {
 		log.Fatal(err)
@@ -47,38 +45,35 @@ func ExampleClient_JoinServer_offline() {
 func ExampleClient_JoinServer_online() {
 	c := NewClient()
 
-	//Login Mojang account to get AccessToken
+	// Login Mojang account to get AccessToken
+	// To use Microsoft Account, see issue #106
+	// https://github.com/Tnze/go-mc/issues/106
 	auth, err := yggdrasil.Authenticate("Your E-mail", "Your Password")
 	if err != nil {
 		panic(err)
 	}
 
-	c.Auth.UUID, c.Name = auth.SelectedProfile()
-	c.AsTk = auth.AccessToken()
+	// As long as you set these three fields correctly,
+	// the client can connect to the online-mode server
+	c.Auth.UUID, c.Auth.Name = auth.SelectedProfile()
+	c.Auth.AsTk = auth.AccessToken()
 
-	//Connect server
-	err = c.JoinServer("localhost", 25565)
+	// Connect server
+	err = c.JoinServer("127.0.0.1")
 	if err != nil {
 		log.Fatal(err)
 	}
 	log.Println("Login success")
 
-	// Regist event handlers
+	// Register event handlers
 	// 	c.Events.GameStart = onGameStartFunc
 	// 	c.Events.ChatMsg = onChatMsgFunc
 	// 	c.Events.Disconnect = onDisconnectFunc
 	//	...
 
-	//Join the game
+	// Join the game
 	err = c.HandleGame()
 	if err != nil {
 		log.Fatal(err)
 	}
-}
-
-func ExampleOfflineUUID() {
-	fmt.Println(OfflineUUID("Tnze"))
-
-	// output:
-	//	c7b9eece-2f2e-325c-8da8-6fc8f3d0edb0
 }

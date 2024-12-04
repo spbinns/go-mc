@@ -23,7 +23,7 @@ func (e *Error) Error() string {
 }
 
 // Domain is the URL of Realms API server
-// Panic if it cannot be parse by url.Parse().
+// Panic if it cannot be parsed by url.Parse().
 var Domain = "https://pc.realms.minecraft.net"
 
 // New create a new Realms c with version, username, accessToken and UUID without dashes.
@@ -52,7 +52,7 @@ func New(version, user, astk, uuid string) *Realms {
 	return r
 }
 
-func (r *Realms) get(endpoint string, resp interface{}) error {
+func (r *Realms) get(endpoint string, resp any) error {
 	rawResp, err := r.c.Get(Domain + endpoint)
 	if err != nil {
 		return err
@@ -67,7 +67,7 @@ func (r *Realms) get(endpoint string, resp interface{}) error {
 	return nil
 }
 
-func (r *Realms) post(endpoint string, payload, resp interface{}) error {
+func (r *Realms) post(endpoint string, payload, resp any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err

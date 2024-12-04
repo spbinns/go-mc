@@ -1,137 +1,128 @@
 // Package bot implements a simple Minecraft client that can join a server
 // or just ping it for getting information.
 //
-// Runnable example could be found at cmd/ .
+// Runnable example could be found at examples/ .
 package bot
 
 import (
-	"fmt"
+	"context"
+	"errors"
 	"net"
 	"strconv"
 
-	"github.com/Tnze/go-mc/data"
+	"github.com/Tnze/go-mc/chat"
 	mcnet "github.com/Tnze/go-mc/net"
 	pk "github.com/Tnze/go-mc/net/packet"
+	"github.com/Tnze/go-mc/net/queue"
+	"github.com/Tnze/go-mc/yggdrasil/user"
 )
 
-// ProtocolVersion , the protocol version number of minecraft net protocol
-const ProtocolVersion = 754
+// ProtocolVersion is the protocol version number of minecraft net protocol
+const (
+	ProtocolVersion = 767
+	DefaultPort     = mcnet.DefaultPort
+)
+
+type JoinOptions struct {
+	MCDialer mcnet.MCDialer
+	Context  context.Context
+
+	// Indicate not to fetch and sending player's PubKey
+	NoPublicKey bool
+
+	// Specify the player PubKey to use.
+	// If nil, it will be obtained from Mojang when joining
+	KeyPair *user.KeyPairResp
+
+	QueueRead  queue.Queue[pk.Packet]
+	QueueWrite queue.Queue[pk.Packet]
+}
 
 // JoinServer connect a Minecraft server for playing the game.
-func (c *Client) JoinServer(addr string, port int) (err error) {
-	return c.JoinServerWithDialer(&net.Dialer{}, fmt.Sprintf("%s:%d", addr, port))
+// Using roughly the same way to parse address as minecraft.
+func (c *Client) JoinServer(addr string) (err error) {
+	return c.JoinServerWithOptions(addr, JoinOptions{})
 }
 
-// JoinServerWithDialer is similar to JoinServer but using a Dialer.
-func (c *Client) JoinServerWithDialer(d Dialer, addr string) (err error) {
-	return c.join(d, addr)
+// JoinServerWithDialer is similar to JoinServer but using a net.Dialer.
+func (c *Client) JoinServerWithDialer(dialer *net.Dialer, addr string) (err error) {
+	return c.JoinServerWithOptions(addr, JoinOptions{
+		MCDialer: (*mcnet.Dialer)(dialer),
+	})
 }
 
-func (c *Client) join(d Dialer, addr string) (err error) {
-	conn, err := d.Dial("tcp", addr)
-	if err != nil {
-		err = fmt.Errorf("bot: connect server fail: %v", err)
-		return err
+func (c *Client) JoinServerWithOptions(addr string, options JoinOptions) (err error) {
+	if options.MCDialer == nil {
+		options.MCDialer = &mcnet.DefaultDialer
 	}
-	//Set Conn
-	c.conn = mcnet.WrapConn(conn)
+	if options.Context == nil {
+		options.Context = context.Background()
+	}
+	if options.QueueRead == nil {
+		options.QueueRead = queue.NewLinkedQueue[pk.Packet]()
+	}
+	if options.QueueWrite == nil {
+		options.QueueWrite = queue.NewLinkedQueue[pk.Packet]()
+	}
+	return c.join(addr, options)
+}
 
-	//Get Host and Port
+func (c *Client) join(addr string, options JoinOptions) error {
+	const Handshake = 0x00
+
+	// Split Host and Port. The DialMCContext will do this once,
+	// but we need the result for sending handshake packet here.
 	host, portStr, err := net.SplitHostPort(addr)
+	var port uint64
 	if err != nil {
-		err = fmt.Errorf("bot: connect server fail: %v", err)
-		return err
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		err = fmt.Errorf("bot: connect server fail: %v", err)
-		return err
-	}
-
-	//Handshake
-	err = c.conn.WritePacket(
-		//Handshake Packet
-		pk.Marshal(
-			0x00,                       //Handshake packet ID
-			pk.VarInt(ProtocolVersion), //Protocol version
-			pk.String(host),            //Server's address
-			pk.UnsignedShort(port),
-			pk.Byte(2),
-		))
-	if err != nil {
-		err = fmt.Errorf("bot: send handshake packect fail: %v", err)
-		return
-	}
-
-	//Login
-	err = c.conn.WritePacket(
-		//LoginStart Packet
-		pk.Marshal(0, pk.String(c.Name)))
-	if err != nil {
-		err = fmt.Errorf("bot: send login start packect fail: %v", err)
-		return
-	}
-
-	for {
-		//Recive Packet
-		var pack pk.Packet
-		pack, err = c.conn.ReadPacket()
+		var addrErr *net.AddrError
+		const missingPort = "missing port in address"
+		if errors.As(err, &addrErr) && addrErr.Err == missingPort {
+			host = addr
+			port = 25565
+		} else {
+			return LoginErr{"split address", err}
+		}
+	} else {
+		port, err = strconv.ParseUint(portStr, 0, 16)
 		if err != nil {
-			err = fmt.Errorf("bot: recv packet for Login fail: %v", err)
-			return
-		}
-
-		//Handle Packet
-		switch pack.ID {
-		case 0x00: //Disconnect
-			var reason pk.String
-			err = pack.Scan(&reason)
-			if err != nil {
-				err = fmt.Errorf("bot: read Disconnect message fail: %v", err)
-			} else {
-				err = fmt.Errorf("bot: connect disconnected by server: %s", reason)
-			}
-			return
-		case 0x01: //Encryption Request
-			if err := handleEncryptionRequest(c, pack); err != nil {
-				return fmt.Errorf("bot: encryption fail: %v", err)
-			}
-		case 0x02: //Login Success
-			// uuid, l := pk.UnpackString(pack.Data)
-			// name, _ := unpackString(pack.Data[l:])
-			return nil
-		case 0x03: //Set Compression
-			var threshold pk.VarInt
-			if err := pack.Scan(&threshold); err != nil {
-				return fmt.Errorf("bot: set compression fail: %v", err)
-			}
-			c.conn.SetThreshold(int(threshold))
-		case 0x04: //Login Plugin Request
-			if err := handlePluginPacket(c, pack); err != nil {
-				return fmt.Errorf("bot: handle plugin packet fail: %v", err)
-			}
+			return LoginErr{"parse port", err}
 		}
 	}
+
+	// Dial connection
+	conn, err := options.MCDialer.DialMCContext(options.Context, addr)
+	if err != nil {
+		return LoginErr{"connect server", err}
+	}
+
+	// Handshake
+	err = conn.WritePacket(pk.Marshal(
+		Handshake,
+		pk.VarInt(ProtocolVersion), // Protocol version
+		pk.String(host),            // Host
+		pk.UnsignedShort(port),     // Port
+		pk.VarInt(2),
+	))
+	if err != nil {
+		return LoginErr{"handshake", err}
+	}
+
+	// Login Start
+	if err := c.joinLogin(conn); err != nil {
+		return err
+	}
+
+	// Configuration
+	if err := c.joinConfiguration(conn); err != nil {
+		return err
+	}
+	c.Conn = warpConn(conn, options.QueueRead, options.QueueWrite)
+	return nil
 }
 
-// A Dialer is a means to establish a connection.
-type Dialer interface {
-	// Dial connects to the given address via the proxy.
-	Dial(network, addr string) (c net.Conn, err error)
-}
+type DisconnectErr chat.Message
 
-// Conn return the MCConn of the Client.
-// Only used when you want to handle the packets by yourself
-func (c *Client) Conn() *mcnet.Conn {
-	return c.conn
-}
-
-// SendMessage sends a chat message.
-func (c *Client) SendMessage(msg string) error {
-	return c.conn.WritePacket(
-		pk.Marshal(
-			data.ChatServerbound,
-			pk.String(msg),
-		),
-	)
+func (d DisconnectErr) Error() string {
+	return "disconnect because: " + chat.Message(d).String()
 }

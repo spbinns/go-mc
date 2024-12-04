@@ -1,56 +1,46 @@
 package bot
 
 import (
+	"errors"
 	"sync"
-	"time"
 
-	"github.com/Tnze/go-mc/bot/path"
-	"github.com/Tnze/go-mc/bot/phy"
-	"github.com/Tnze/go-mc/bot/world"
-	"github.com/Tnze/go-mc/bot/world/entity"
-	"github.com/Tnze/go-mc/bot/world/entity/player"
-	"github.com/Tnze/go-mc/data"
+	"github.com/google/uuid"
+
+	"github.com/Tnze/go-mc/data/packetid"
 	"github.com/Tnze/go-mc/net"
-	"github.com/Tnze/go-mc/net/packet"
 	pk "github.com/Tnze/go-mc/net/packet"
+	"github.com/Tnze/go-mc/net/queue"
+	"github.com/Tnze/go-mc/registry"
 )
 
 // Client is used to access Minecraft server
 type Client struct {
-	conn *net.Conn
-	Auth
+	Conn *Conn
+	Auth Auth
 
-	player.Player
-	PlayInfo
-	ServInfo
-	abilities PlayerAbilities
-	settings  Settings
+	// These are filled when login process
+	Name       string
+	UUID       uuid.UUID
+	Registries registry.Registries
+	Cookies    map[string][]byte
 
-	Wd             world.World //the map data
-	Inputs         path.Inputs
-	Physics        phy.State
-	lastPosTx      time.Time
-	justTeleported bool
+	// Ingame packet handlers
+	Events Events
 
-	// Delegate allows you push a function to let HandleGame run.
-	// Do not send at the same goroutine!
-	Delegate chan func() error
-	Events   eventBroker
+	// Login plugins
+	LoginPlugin map[string]CustomPayloadHandler
 
-	closing chan struct{}
-	inbound chan pk.Packet
-	wg      sync.WaitGroup
+	// Configuration handler
+	ConfigHandler
+
+	CustomReportDetails map[string]string
 }
+
+// CustomPayloadHandler is a function handling custom payload
+type CustomPayloadHandler func(data []byte) ([]byte, error)
 
 func (c *Client) Close() error {
-	close(c.closing)
-	err := c.disconnect()
-	c.wg.Wait()
-	return err
-}
-
-func (c *Client) SendCloseWindow(windowID byte) error {
-	return c.conn.WritePacket(packet.Marshal(data.CloseWindowServerbound, pk.UnsignedByte(windowID)))
+	return c.Conn.Close()
 }
 
 // NewClient init and return a new Client.
@@ -62,45 +52,85 @@ func (c *Client) SendCloseWindow(windowID byte) error {
 // and load your Name, UUID and AccessToken to client.
 func NewClient() *Client {
 	return &Client{
-		settings: DefaultSettings,
-		Auth:     Auth{Name: "Steve"},
-		Delegate: make(chan func() error),
-		Wd: world.World{
-			Entities: make(map[int32]*entity.Entity, 8192),
-			Chunks:   make(map[world.ChunkLoc]*world.Chunk, 2048),
-		},
-		closing: make(chan struct{}),
-		inbound: make(chan pk.Packet, 5),
+		Auth:                Auth{Name: "Steve"},
+		Registries:          registry.NewNetworkCodec(),
+		Events:              Events{handlers: make([][]PacketHandler, packetid.ClientboundPacketIDGuard)},
+		LoginPlugin:         make(map[string]CustomPayloadHandler),
+		ConfigHandler:       NewDefaultConfigHandler(),
+		CustomReportDetails: make(map[string]string),
 	}
 }
 
-//PlayInfo content player info in server.
-type PlayInfo struct {
-	Gamemode         int      //游戏模式
-	Hardcore         bool     //是否是极限模式
-	Dimension        int      //维度
-	Difficulty       int      //难度
-	ViewDistance     int      //视距
-	ReducedDebugInfo bool     //减少调试信息
-	WorldName        string   //当前世界的名字
-	IsDebug          bool     //调试
-	IsFlat           bool     //超平坦世界
-	SpawnPosition    Position //主世界出生点
+// Conn is a concurrently-safe warpper of net.Conn with packet queue.
+// Note that not all methods are concurrently-safe.
+type Conn struct {
+	*net.Conn
+	send, recv queue.Queue[pk.Packet]
+	pool       sync.Pool // pool of recv packet data
+	rerr       error
 }
 
-// ServInfo contains information about the server implementation.
-type ServInfo struct {
-	Brand string
+func warpConn(c *net.Conn, qr, qw queue.Queue[pk.Packet]) *Conn {
+	wc := Conn{
+		Conn: c,
+		send: qw,
+		recv: qr,
+		pool: sync.Pool{New: func() any { return []byte{} }},
+		rerr: nil,
+	}
+	go func() {
+		for {
+			// take a buffer from pool, after the packet is handled we put it back
+			p := pk.Packet{Data: wc.pool.Get().([]byte)}
+			if err := c.ReadPacket(&p); err != nil {
+				wc.rerr = err
+				break
+			}
+			if ok := wc.recv.Push(p); !ok {
+				wc.rerr = errors.New("receive queue is full")
+				break
+			}
+		}
+		wc.recv.Close()
+	}()
+	go func() {
+		for {
+			p, ok := wc.send.Pull()
+			if !ok {
+				break
+			}
+			if err := c.WritePacket(p); err != nil {
+				break
+			}
+		}
+	}()
+
+	return &wc
 }
 
-// PlayerAbilities defines what player can do.
-type PlayerAbilities struct {
-	Flags               int8
-	FlyingSpeed         float32
-	FieldofViewModifier float32
+func (c *Conn) ReadPacket(p *pk.Packet) error {
+	packet, ok := c.recv.Pull()
+	if !ok {
+		return c.rerr
+	}
+	*p = packet
+	return nil
 }
 
-//Position is a 3D vector.
+func (c *Conn) WritePacket(p pk.Packet) error {
+	ok := c.send.Push(p)
+	if !ok {
+		return errors.New("queue is full")
+	}
+	return nil
+}
+
+func (c *Conn) Close() error {
+	c.send.Close()
+	return c.Conn.Close()
+}
+
+// Position is a 3D vector.
 type Position struct {
 	X, Y, Z int
 }

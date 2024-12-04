@@ -14,6 +14,9 @@
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
 
-cmd/test/test.go
+examples/test/test.go
+examples/genmaps/genmaps
+examples/genmaps/*.png
+data/packetid/generate.go
 .idea/
 .vscode/

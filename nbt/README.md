@@ -1,53 +1,63 @@
-# NBT
-This package implement the Named Binary Tag format of Minecraft. It supports all formats
-of NBT including compact arrays for longs.
+# NBT [![Go Reference](https://pkg.go.dev/badge/github.com/Tnze/go-mc/nbt.svg)](https://pkg.go.dev/github.com/Tnze/go-mc/nbt)
 
-# Usage
-For the following NBT tag:
+This package implements the [Named Binary Tag](https://wiki.vg/NBT) format of Minecraft.
 
+The API is very similar to the standard library `encoding/json`.
+(But fix some its problem)
+If you (high probability) have used that, it is easy to use this.
+
+## Supported Struct Tags and Options
+
+- `nbt` - The primary tag name. See below.
+- `nbtkey` - The key name of the field (Used to support commas `,` in tag names)
+
+### The `nbt` tag
+
+In most cases, you only need this one to specify the name of the tag. 
+
+The format of `nbt` struct tag: `<nbt tag>[,opt]`.
+
+It's a comma-separated list of options.
+The first item is the name of the tag, and the rest are options.
+
+Like this:
+```go
+type MyStruct struct {
+    Name string `nbt:"name"`
+}
 ```
-TAG_Compound("hello world") {
-    TAG_String('name'): 'Bananrama'
-}   
+
+To tell the encoder not to encode a field, use `-`:
+```go
+type MyStruct struct {
+    Internal string `nbt:"-"`
+}
 ```
 
-To read and write would look like:
+To tell the encoder to skip the field if it is zero value, use `omitempty`:
+```go
+type MyStruct struct {
+    Name string `nbt:"name,omitempty"`
+}
+```
+
+Fields typed `[]byte`, `[]int32` and `[]int64` will be encoded as `TagByteArray`, `TagIntArray` and `TagLongArray` respectively by default.
+You can override this behavior by specifying encode them as`TagList` by using `list`:
+```go
+type MyStruct struct {
+    Data []byte `nbt:"data,list"`
+}
+```
+
+### The `nbtkey` tag
+
+Common issue with JSON standard libraries: inability to specify keys containing commas for structures.
+(e.g `{"a,b" : "c"}`)
+
+So this is a workaround for that:
 
 ```go
-package main
-
-import "bytes"
-import "github.com/Tnze/go-mc/nbt"
-
-type Compound struct {
-    Name string `nbt:"name"` // Note that if name is private (name), the field will not be used
-}
-
-func main() {
-    var out bytes.Buffer
-    banana := Compound{Name: "Bananrama"}
-    _ = nbt.Marshal(&out, banana)
-
-    var rama Compound
-    _ = nbt.Unmarshal(out.Bytes(), &rama)
+type MyStruct struct {
+    AB string `nbt:",omitempty" nbtkey:"a,b"`
 }
 ```
-
-# Struct field tags
-There are two tags supported:
-- nbt
-- nbt_type
-
-The `nbt` tag is used to change the name of the NBT Tag field, whereas the `nbt_type`
- tag is used to enforce a certain NBT Tag type when it is ambiguous.
- 
-For example:
-```go
-type Compound struct {
-    LongArray []int64
-    LongList []int64 `nbt_type:"list"` // forces a long list instead of a long array
-}
-```
-
-# Docs
-[![GoDoc](https://godoc.org/github.com/Tnze/go-mc/nbt?status.svg)](https://godoc.org/github.com/Tnze/go-mc/nbt)
